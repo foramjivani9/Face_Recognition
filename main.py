@@ -25,6 +25,40 @@ dynamodb = boto3.client('dynamodb', region_name=regionName)
 s3 = boto3.client('s3')
 
 
+def checkNoOfFaces(fileName):
+    response = rekognition.detect_faces(Image={
+        'S3Object': {
+            'Bucket': bucket,
+            'Name': fileName
+        }
+    },
+    Attributes=[
+        'ALL'
+    ]
+    )
+    responseDict = {}
+    if len(response['FaceDetails']  ) !=0 :
+        print("valid face detected")
+        if len(response['FaceDetails']  ) > 1 :
+            print('multiple person detected')
+            responseDict["otherDetails"] = 'Multiple person Detected'
+            responseDict["isFaceFound"] = True
+            responseDict["isMoreThanOnePerson"] = True
+        else:
+            print('single person detected')
+            responseDict["otherDetails"] = 'Single person detected'
+            responseDict["isFaceFound"] = True
+            responseDict["isMoreThanOnePerson"] = False
+        #self.loginfo += 'Time taken to detect face in ID proof ===== '+ str(time.time()-st)+'\n'
+    else:
+        print('No photo present/poor quality images in ID proof')
+        responseDict["otherDetails"] = 'No face present/poor quality image'
+        responseDict["isFaceFound"] = False
+        responseDict["isMoreThanOnePerson"] = False
+        
+    return responseDict
+
+
 def create_collection(collection_id):
 
     client=boto3.client('rekognition')
@@ -38,13 +72,14 @@ def create_collection(collection_id):
 
 def list_collections():
 
-    max_results=2
+    #max_results=2
     
     collection_ids=[]
 
     #Display all the collections
     #print('Displaying collections...')
-    response=rekognition.list_collections(MaxResults=max_results)
+    #MaxResults=max_results
+    response=rekognition.list_collections()
     collection_count=0
     done=False
     
@@ -56,7 +91,7 @@ def list_collections():
             collection_count+=1
         if 'NextToken' in response:
             nextToken=response['NextToken']
-            response=rekognition.list_collections(NextToken=nextToken,MaxResults=max_results)
+            response=rekognition.list_collections(NextToken=nextToken) #,MaxResults=max_results
             
         else:
             done=True
@@ -73,77 +108,132 @@ def register():
     req_data = request.get_json(force=True)
     s3BucketUrl = req_data['s3BucketUrl']
     userKey = req_data['userKey']
+    company = req_data['company']
     #emp_name = req_data['emp_name']
     fileName = s3BucketUrl.split('/')[-1]
     print(fileName)
     #print(faceid)
     
-    collection_id = str(userKey)
+    collection_id = str(company)+'_'+str(userKey)
     
     collection_ids = list_collections()
     print(collection_ids)
     
-    if collection_id not in collection_ids:
-        create_collection(collection_id)
-    try:
-        response = rekognition.index_faces(
-                                    CollectionId=collection_id,
-                                    Image={
-                                            "S3Object": {"Bucket": bucket,"Name": fileName} 
-                                          }, 
-                                    ExternalImageId= userKey,
-                                    DetectionAttributes = ['ALL']
-                                    )
-        
-        # Commit faceId and full name emp_code to DynamoDB
-            
-        responseDict = {}
-        if response['ResponseMetadata']['HTTPStatusCode'] == 200:
-            faceId = response['FaceRecords'][0]['Face']['FaceId']
+    comapny_collection_ids = [i for i in collection_ids if i.startswith(company)]
     
-            #ret = s3.head_object(Bucket=bucket,Key=fileName)
-            #ret['Metadata']['fullname']
-            #personFullName = emp_name
-            #print(personFullName)
-            
-            createdOn = str(datetime.datetime.now())
     
-            response = dynamodb.put_item(
-            TableName=tableName,
-            Item={
-                'RekognitionId': {'S': faceId},
-                #'FullName': {'S': personFullName},
-                'UserKey': {'S': userKey},
-                'CreationDate' : {'S' : createdOn }
-                }
-            )
-            responseDict["success"] = True
-            responseDict["otherDetails"] = {}
-            responseDict["otherDetails"]["RekognitionId"] = faceId
+    result_checkface = checkNoOfFaces(fileName)
+    
+    if result_checkface['isFaceFound'] == True and result_checkface['isMoreThanOnePerson'] == False :
         
+        result = searchFaceInCompanyCollection(fileName,comapny_collection_ids)
+        
+        if result["found"] == True :
+            return result
+       
         else:
-            responseDict["success"] = False
-            responseDict["Message"] = "Error in Registration"
-            
-        return json.dumps(responseDict)
-    
-    except Exception as e:
-        print(e)
-        #register()
-        responseDict = {}
-        responseDict["success"] = False
-        responseDict["otherDetails"] = {}
-        responseDict["otherDetails"]["Message"] = e.response['Error']['Message']
-        return json.dumps(responseDict)
         
+            if collection_id not in collection_ids:
+                create_collection(collection_id)
+            try:
+                response = rekognition.index_faces(
+                                            CollectionId=collection_id,
+                                            Image={
+                                                    "S3Object": {"Bucket": bucket,"Name": fileName} 
+                                                  }, 
+                                            ExternalImageId= userKey,
+                                            DetectionAttributes = ['ALL']
+                                            )
+                
+                # Commit faceId and full name emp_code to DynamoDB
+                    
+                responseDict = {}
+                if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+                    faceId = response['FaceRecords'][0]['Face']['FaceId']
+            
+                    #ret = s3.head_object(Bucket=bucket,Key=fileName)
+                    #ret['Metadata']['fullname']
+                    #personFullName = emp_name
+                    #print(personFullName)
+                    
+                    createdOn = str(datetime.datetime.now())
+            
+                    response = dynamodb.put_item(
+                    TableName=tableName,
+                    Item={
+                        'RekognitionId': {'S': faceId},
+                        #'FullName': {'S': personFullName},
+                        'UserKey': {'S': userKey},
+                        'Company': {'S': company},
+                        'CreationDate' : {'S' : createdOn }
+                        }
+                    )
+                    responseDict["success"] = True
+                    responseDict["otherDetails"] = {}
+                    responseDict["otherDetails"]["RekognitionId"] = faceId
+                
+                else:
+                    responseDict["success"] = False
+                    responseDict["Message"] = "Error in Registration"
+                    
+                return json.dumps(responseDict)
+            
+            except Exception as e:
+                print(e)
+                #register()
+                responseDict = {}
+                responseDict["success"] = False
+                responseDict["otherDetails"] = {}
+                responseDict["otherDetails"]["Message"] = e.response['Error']['Message']
+                return json.dumps(responseDict)
+            
+    else:
+        return result_checkface
+
+def searchFaceInCompanyCollection(fileName, comapny_collection_ids):
+    threshold = 70
+    maxFaces=1
+
+    for collection_id in comapny_collection_ids:
+        responseDict = {}
+        try:
+            response=rekognition.search_faces_by_image(CollectionId=collection_id,
+                                        Image={'S3Object':{'Bucket':bucket,'Name':fileName}},
+                                        FaceMatchThreshold=threshold,
+                                        MaxFaces=maxFaces)
+        
+                                        
+            faceMatches=response['FaceMatches']
+            
+            if len(faceMatches) != 0 :
+                print ('Matching face found in collection = ', collection_id)
+                responseDict["otherDetails"]= 'Matching face found in collection = ' + collection_id
+                responseDict["found"] = True
+                return responseDict
+                #responseDict["otherDetails"][face_id]= {}
+                #responseDict["otherDetails"][face_id]['Similarity']= similarity
+                
+            else:
+                #res= 'No face exists in other collection. Create new collection'
+                responseDict["otherDetails"]= 'No face exists in other collection. Create new collection'
+                responseDict["found"] = False
+        except Exception as e:
+            print(e)
+            #register()
+            #responseDict = {}
+            #responseDict["success"] = False
+            #responseDict["otherDetails"] = {}
+            #responseDict["otherDetails"]["Message"] = e.response['Error']['Message']
+            #return json.dumps(responseDict) 
+    return responseDict      
     
 
-def SearchFace(fileName,userKey):
+def SearchFace(fileName,userKey,company):
 
     threshold = 70
     maxFaces=1
   
-    collection_id = str(userKey)
+    collection_id = str(company)+ '_' + str(userKey)
     responseDict = {}
     try:
         response=rekognition.search_faces_by_image(CollectionId=collection_id,
@@ -218,6 +308,7 @@ def verify():
     req_data = request.get_json(force=True)
     s3BucketUrl = req_data['s3BucketUrl']
     userKey = req_data['userKey']
+    company = req_data['company']
     #emp_name = req_data['emp_name']
     fileName = s3BucketUrl.split('/')[-1]
     #faceid = req_data['faceid']
@@ -229,21 +320,29 @@ def verify():
     #print(filename)
     #print(faceid)
     
-    matched_faces = SearchFace(fileName,userKey)
+    result_checkface = checkNoOfFaces(fileName)
     
-    print("hello")
-    print(matched_faces)
+    if result_checkface['isFaceFound'] == True and result_checkface['isMoreThanOnePerson'] == False :
+
     
-    # check if data is in table 
+        matched_faces = SearchFace(fileName,userKey,company)
+        
+        print("hello")
+        print(matched_faces)
+        
+        # check if data is in table 
+        
+        
+        matched_faces_json = json.dumps(matched_faces)
+        return matched_faces_json
     
-    
-    matched_faces_json = json.dumps(matched_faces)
-    return matched_faces_json
+    else:
+        return result_checkface
 
 
-def updation(fileName,userKey):
+def updation(fileName,userKey,company):
     
-    collection_id = str(userKey) 
+    collection_id = str(company) + '_'+ str(userKey) 
     response = rekognition.index_faces(
                                 CollectionId=collection_id,
                                 Image={
@@ -272,6 +371,7 @@ def updation(fileName,userKey):
             'RekognitionId': {'S': faceId},
             #'FullName': {'S': personFullName},
             'UserKey': {'S': userKey},
+            'Company': {'S': company},
             'CreationDate' : {'S' : createdOn }
             }
         )
@@ -292,6 +392,7 @@ def update():
     req_data = request.get_json(force=True)
     s3BucketUrl = req_data['s3BucketUrl']
     userKey = req_data['userKey']
+    company = req_data['company']
     #emp_name = req_data['emp_name']
     fileName = s3BucketUrl.split('/')[-1]
     #faceid = req_data['faceid']
@@ -303,18 +404,25 @@ def update():
     #print(filename)
     #print(faceid)
     
-    matched_faces = SearchFace(fileName,userKey)
+    result_checkface = checkNoOfFaces(fileName)
     
-    print(matched_faces)
+    if result_checkface['isFaceFound'] == True and result_checkface['isMoreThanOnePerson'] == False :
     
-    responseDict ={} 
-    # check if data is in table 
-    if matched_faces["success"] == True :
-        responseDict = updation(fileName,userKey)
-    else :
-        responseDict = matched_faces
-    matched_faces_json = json.dumps(responseDict)
-    return matched_faces_json
+        matched_faces = SearchFace(fileName,userKey,company)
+        
+        print(matched_faces)
+        
+        responseDict ={} 
+        # check if data is in table 
+        if matched_faces["success"] == True :
+            responseDict = updation(fileName,userKey)
+        else :
+            responseDict = matched_faces
+        matched_faces_json = json.dumps(responseDict)
+        return matched_faces_json
+    
+    else:
+        return result_checkface
 
 '''
 def list_faces_in_collection():
@@ -376,10 +484,11 @@ def delete():
     req_data = request.get_json(force=True)
     #s3BucketUrl = req_data['s3BucketUrl']
     userKey = req_data['userKey']
+    company = req_data['company']
     #emp_name = req_data['emp_name']
     #fileName = s3BucketUrl.split('/')[-1]
     
-    collection_id = str(userKey) 
+    collection_id = str(company) + '_' +  str(userKey) 
     
     responseDict = delete_collection(collection_id)
     
